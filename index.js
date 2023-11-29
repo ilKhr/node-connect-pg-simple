@@ -28,7 +28,11 @@ const callbackifyPromiseResolution = (value, cb) => {
     value.then(
       // eslint-disable-next-line unicorn/no-null
       (ret) => process.nextTick(cb, null, ret),
-      (err) => process.nextTick(cb, err || new Error('Promise was rejected with falsy value'))
+      (err) =>
+        process.nextTick(
+          cb,
+          err || new Error('Promise was rejected with falsy value')
+        )
     );
   }
 };
@@ -51,6 +55,14 @@ const escapePgIdentifier = (value) => value.replaceAll('"', '""');
 /** @typedef {Object<string, any>} PGStoreQueryResult */
 /** @typedef {(err: Error|null, firstRow?: PGStoreQueryResult) => void} PGStoreQueryCallback */
 
+/** @typedef {import('pg').Pool} Pool */
+/** @typedef {() => Pool} PoolFunction */
+
+/**
+ * @typedef {Object} PoolManager
+ * @property {()=>Pool} getInstance
+ */
+
 /**
  * @typedef PGStoreOptions
  * @property {string} [schemaName]
@@ -59,7 +71,7 @@ const escapePgIdentifier = (value) => value.replaceAll('"', '""');
  * @property {number} [ttl]
  * @property {boolean} [disableTouch]
  * @property {typeof console.error} [errorLog]
- * @property {import('pg').Pool} [pool]
+ * @property {Pool|PoolFunction|undefined} [pool]
  * @property {*} [pgPromise]
  * @property {string} [conString]
  * @property {*} [conObject]
@@ -73,7 +85,8 @@ const escapePgIdentifier = (value) => value.replaceAll('"', '""');
  */
 module.exports = function (session) {
   /** @type {ExpressSessionStore} */
-  const Store = session.Store ||
+  const Store =
+    session.Store ||
     // @ts-ignore
     session.session.Store;
 
@@ -88,7 +101,8 @@ module.exports = function (session) {
     #ownsPg;
     /** @type {*} */
     #pgPromise;
-    /** @type {import('pg').Pool|undefined} */
+    /** @type {PoolManager} */
+    // @ts-ignore
     #pool;
     /** @type {false|number} */
     #pruneSessionInterval;
@@ -105,13 +119,22 @@ module.exports = function (session) {
     constructor (options = {}) {
       super(options);
 
-      this.#schemaName = options.schemaName ? escapePgIdentifier(options.schemaName) : undefined;
-      this.#tableName = options.tableName ? escapePgIdentifier(options.tableName) : 'session';
+      this.#schemaName = options.schemaName
+        ? escapePgIdentifier(options.schemaName)
+        : undefined;
+      this.#tableName = options.tableName
+        ? escapePgIdentifier(options.tableName)
+        : 'session';
 
       if (!this.#schemaName && this.#tableName.includes('"."')) {
         // eslint-disable-next-line no-console
-        console.warn('DEPRECATION WARNING: Schema should be provided through its dedicated "schemaName" option rather than through "tableName"');
-        this.#tableName = this.#tableName.replace(/^([^"]+)""\.""([^"]+)$/, '$1"."$2');
+        console.warn(
+          'DEPRECATION WARNING: Schema should be provided through its dedicated "schemaName" option rather than through "tableName"'
+        );
+        this.#tableName = this.#tableName.replace(
+          /^([^"]+)""\.""([^"]+)$/,
+          '$1"."$2'
+        );
       }
 
       this.#createTableIfMissing = !!options.createTableIfMissing;
@@ -123,12 +146,18 @@ module.exports = function (session) {
       // eslint-disable-next-line no-console
       this.#errorLog = options.errorLog || console.error.bind(console);
 
-      if (options.pool !== undefined) {
-        this.#pool = options.pool;
+      if (options.pool) {
+        this.#pool = {
+          getInstance: () =>
+            // @ts-ignore
+            typeof options.pool === 'function' ? options.pool() : options.pool,
+        };
         this.#ownsPg = false;
       } else if (options.pgPromise !== undefined) {
         if (typeof options.pgPromise.any !== 'function') {
-          throw new TypeError('`pgPromise` config must point to an existing and configured instance of pg-promise pointing at your database');
+          throw new TypeError(
+            '`pgPromise` config must point to an existing and configured instance of pg-promise pointing at your database'
+          );
         }
         this.#pgPromise = options.pgPromise;
         this.#ownsPg = false;
@@ -143,8 +172,8 @@ module.exports = function (session) {
             conObject.connectionString = conString;
           }
         }
-        this.#pool = new (require('pg')).Pool(conObject);
-        this.#pool.on('error', err => {
+        this.#pool = { getInstance: () => new (require('pg').Pool)(conObject) };
+        this.#pool.getInstance().on('error', (err) => {
           this.#errorLog('PG Pool error:', err);
         });
         this.#ownsPg = true;
@@ -153,13 +182,14 @@ module.exports = function (session) {
       if (options.pruneSessionInterval === false) {
         this.#pruneSessionInterval = false;
       } else {
-        this.#pruneSessionInterval = (options.pruneSessionInterval || DEFAULT_PRUNE_INTERVAL_IN_SECONDS) * 1000;
+        this.#pruneSessionInterval =
+          (options.pruneSessionInterval || DEFAULT_PRUNE_INTERVAL_IN_SECONDS) *
+          1000;
         if (options.pruneSessionRandomizedInterval !== false) {
-          this.#pruneSessionRandomizedInterval = (
+          this.#pruneSessionRandomizedInterval =
             options.pruneSessionRandomizedInterval ||
             // Results in at least 50% of the specified interval and at most 150%. Makes it so that multiple instances doesn't all prune at the same time.
-            (delay => Math.ceil(delay / 2 + delay * Math.random()))
-          );
+            ((delay) => Math.ceil(delay / 2 + delay * Math.random()));
         }
       }
     }
@@ -173,14 +203,24 @@ module.exports = function (session) {
     async _rawEnsureSessionStoreTable () {
       const quotedTable = this.quotedTable();
 
-      const res = await this._asyncQuery('SELECT to_regclass($1::text)', [quotedTable], true);
+      const res = await this._asyncQuery(
+        'SELECT to_regclass($1::text)',
+        [quotedTable],
+        true
+      );
 
       if (res && res['to_regclass'] === null) {
         const pathModule = require('node:path');
         const fs = require('node:fs').promises;
 
-        const tableDefString = await fs.readFile(pathModule.resolve(__dirname, './table.sql'), 'utf8');
-        const tableDefModified = tableDefString.replaceAll('"session"', quotedTable);
+        const tableDefString = await fs.readFile(
+          pathModule.resolve(__dirname, './table.sql'),
+          'utf8'
+        );
+        const tableDefModified = tableDefString.replaceAll(
+          '"session"',
+          quotedTable
+        );
 
         await this._asyncQuery(tableDefModified, [], true);
       }
@@ -216,8 +256,8 @@ module.exports = function (session) {
 
       this.#clearPruneTimer();
 
-      if (this.#ownsPg && this.#pool) {
-        await this.#pool.end();
+      if (this.#ownsPg) {
+        await this.#pool.getInstance().end();
       }
     }
 
@@ -227,10 +267,9 @@ module.exports = function (session) {
           ? this.#pruneSessionRandomizedInterval(this.#pruneSessionInterval)
           : this.#pruneSessionInterval;
 
-        this.pruneTimer = setTimeout(
-          () => { this.pruneSessions(); },
-          delay
-        );
+        this.pruneTimer = setTimeout(() => {
+          this.pruneSessions();
+        }, delay);
         this.pruneTimer.unref();
       }
     }
@@ -250,18 +289,24 @@ module.exports = function (session) {
      * @access public
      */
     pruneSessions (fn) {
-      this.query('DELETE FROM ' + this.quotedTable() + ' WHERE expire < to_timestamp($1)', [currentTimestamp()], err => {
-        if (fn && typeof fn === 'function') {
-          return fn(err);
-        }
+      this.query(
+        'DELETE FROM ' +
+          this.quotedTable() +
+          ' WHERE expire < to_timestamp($1)',
+        [currentTimestamp()],
+        (err) => {
+          if (fn && typeof fn === 'function') {
+            return fn(err);
+          }
 
-        if (err) {
-          this.#errorLog('Failed to prune sessions:', err);
-        }
+          if (err) {
+            this.#errorLog('Failed to prune sessions:', err);
+          }
 
-        this.#clearPruneTimer();
-        this.#initPruneTimer();
-      });
+          this.#clearPruneTimer();
+          this.#initPruneTimer();
+        }
+      );
     }
 
     /**
@@ -317,8 +362,10 @@ module.exports = function (session) {
         const res = await this.#pgPromise.any(query, params);
         return res && res[0] ? res[0] : undefined;
       } else {
-        if (!this.#pool) throw new Error('Pool missing for some reason');
-        const res = await this.#pool.query(query, params);
+        if (!this.#pool.getInstance()) {
+          throw new Error('Pool missing for some reason');
+        }
+        const res = await this.#pool.getInstance().query(query, params);
         return res && res.rows && res.rows[0] ? res.rows[0] : undefined;
       }
     }
@@ -360,17 +407,33 @@ module.exports = function (session) {
     get (sid, fn) {
       this.#initPruneTimer();
 
-      this.query('SELECT sess FROM ' + this.quotedTable() + ' WHERE sid = $1 AND expire >= to_timestamp($2)', [sid, currentTimestamp()], (err, data) => {
-        if (err) { return fn(err); }
-        // eslint-disable-next-line unicorn/no-null
-        if (!data) { return fn(null); }
-        try {
-          // eslint-disable-next-line unicorn/no-null
-          return fn(null, (typeof data['sess'] === 'string') ? JSON.parse(data['sess']) : data['sess']);
-        } catch {
-          return this.destroy(sid, fn);
+      this.query(
+        'SELECT sess FROM ' +
+          this.quotedTable() +
+          ' WHERE sid = $1 AND expire >= to_timestamp($2)',
+        [sid, currentTimestamp()],
+        (err, data) => {
+          if (err) {
+            return fn(err);
+          }
+
+          if (!data) {
+            // eslint-disable-next-line unicorn/no-null
+            return fn(null);
+          }
+          try {
+            return fn(
+              // eslint-disable-next-line unicorn/no-null
+              null,
+              typeof data['sess'] === 'string'
+                ? JSON.parse(data['sess'])
+                : data['sess']
+            );
+          } catch {
+            return this.destroy(sid, fn);
+          }
         }
-      });
+      );
     }
 
     /**
@@ -385,13 +448,14 @@ module.exports = function (session) {
       this.#initPruneTimer();
 
       const expireTime = this.#getExpireTime(sess);
-      const query = 'INSERT INTO ' + this.quotedTable() + ' (sess, expire, sid) SELECT $1, to_timestamp($2), $3 ON CONFLICT (sid) DO UPDATE SET sess=$1, expire=to_timestamp($2) RETURNING sid';
+      const query =
+        'INSERT INTO ' +
+        this.quotedTable() +
+        ' (sess, expire, sid) SELECT $1, to_timestamp($2), $3 ON CONFLICT (sid) DO UPDATE SET sess=$1, expire=to_timestamp($2) RETURNING sid';
 
-      this.query(
-        query,
-        [sess, expireTime, sid],
-        err => { fn && fn(err); }
-      );
+      this.query(query, [sess, expireTime, sid], (err) => {
+        fn && fn(err);
+      });
     }
 
     /**
@@ -407,7 +471,9 @@ module.exports = function (session) {
       this.query(
         'DELETE FROM ' + this.quotedTable() + ' WHERE sid = $1',
         [sid],
-        err => { fn && fn(err); }
+        (err) => {
+          fn && fn(err);
+        }
       );
     }
 
@@ -431,9 +497,13 @@ module.exports = function (session) {
       const expireTime = this.#getExpireTime(sess);
 
       this.query(
-        'UPDATE ' + this.quotedTable() + ' SET expire = to_timestamp($1) WHERE sid = $2 RETURNING sid',
+        'UPDATE ' +
+          this.quotedTable() +
+          ' SET expire = to_timestamp($1) WHERE sid = $2 RETURNING sid',
         [expireTime, sid],
-        err => { fn && fn(err); }
+        (err) => {
+          fn && fn(err);
+        }
       );
     }
   }
